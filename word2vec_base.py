@@ -40,7 +40,7 @@ class Word2VecCPU:
         self.word_to_index = {word: index for index, word in enumerate(self.vocabulary)}
         self.vocab_size = len(self.vocabulary)
         self.initialize_embeddings()
-        print(f"Total parameters in model: {self.vocab_size * self.embedding_dim}")
+        print(f"Total parameters in model: {self.vocab_size * self.embedding_dim} and num tokens: {self.vocab_size}")
 
     def initialize_embeddings(self):
         # Initialize word and context vectors randomly
@@ -59,7 +59,8 @@ class Word2VecCPU:
                 if idx % 1000 == 0:
                     print(f"Done with {idx} word-target pair")
                 idx += 1
-            print(f"Epoch {epoch + 1}, Loss: {total_loss / len(self.vocabulary)}. Tot Pairs: {idx}. Time taken: {dt.datetime.now() - t_epoch}")
+            tot_time = dt.datetime.now() - t_epoch
+            print(f"Epoch {epoch + 1}, Loss: {total_loss / len(self.vocabulary)}.Tot Pairs: {idx}. Time per pair (4 matmuls): {tot_time / idx} Time taken: {tot_time}")
             new_learning_rate = self.learning_rate * 1 / ((1 + self.learning_rate * epoch))
             print(f"Changing alpha from {self.learning_rate} to {new_learning_rate}")
             self.learning_rate = new_learning_rate

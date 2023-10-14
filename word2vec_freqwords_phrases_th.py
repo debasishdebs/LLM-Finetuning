@@ -6,11 +6,12 @@ import math
 from collections import defaultdict
 import torch as th
 import datetime as dt
-import multiprocessing
+from word2vec import Word2VecBase
 
 
-class Word2VecLearnPhraseSampleFreqWordGPU:
+class Word2VecLearnPhraseSampleFreqWordGPU(Word2VecBase):
     def __init__(self, corpus, embedding_dim, context_window=2, subsampling_threshold=1e-5, learning_rate=0.025):
+        super().__init__()
         self.corpus = corpus
         self.embedding_dim = embedding_dim
         self.context_window = context_window
@@ -26,11 +27,6 @@ class Word2VecLearnPhraseSampleFreqWordGPU:
 
     def __str__(self):
         return "Word2Vec-Softmax-FreqWordSampling-LearnPhrases-GPU"
-
-    def preprocess(self, text):
-        text = text.lower()
-        text = re.sub(r'[^a-zA-Z\s]', '', text)
-        return text.split()
 
     def discard_probability(self, word_frequency):
         """
@@ -76,7 +72,7 @@ class Word2VecLearnPhraseSampleFreqWordGPU:
             for phrase in self.vocabulary}
         self.vocab_size = len(self.vocabulary)
         self.initialize_embeddings()
-        print(f"Total parameters in model: {self.vocab_size * self.embedding_dim}")
+        print(f"Total parameters in model: {self.vocab_size * self.embedding_dim} and num tokens: {self.vocab_size}")
 
     def generate_unigram_bigram_scores(self, words):
         word_freq = defaultdict(int)
@@ -125,64 +121,13 @@ class Word2VecLearnPhraseSampleFreqWordGPU:
         score = (count_wi_wj - self.phrase_discounting_coeff) / (count_wi * count_wj)
         return score
 
-    def initialize_embeddings(self):
-        # Initialize word and context vectors randomly
-        self.word_vectors = th.eye(self.vocab_size)
-        self.U_weights = th.randn(self.vocab_size, self.embedding_dim)
-        self.V_weights = th.randn(self.embedding_dim, self.vocab_size)
-        self.word_vectors = self.word_vectors.to(device="cuda")
-        self.U_weights = self.U_weights.to(device="cuda")
-        self.V_weights = self.V_weights.to(device="cuda")
-
-    def train(self, num_epochs):
-        t_start = dt.datetime.now()
-        for epoch in range(num_epochs):
-            total_loss = 0
-            t_epoch = dt.datetime.now()
-            idx = 1
-            # training_data =  self.generate_training_data()
-            # with multiprocessing.Pool(processes=5) as pool:
-            #     results = pool.map(self.train_pair, training_data)
-            # total_loss = sum(results)
-
-            for context_word, target_word in self.generate_training_data():
-                total_loss += self.train_pair((context_word, target_word))
-                if idx % 10000 == 0:
-                    print(f"Done with {idx} word-target pair")
-                idx += 1
-            print(f"Epoch {epoch + 1}, Loss: {total_loss / len(self.vocabulary)}.Tot Pairs: {idx}. Time taken: {dt.datetime.now() - t_epoch}")
-            new_learning_rate = self.learning_rate * 1 / ((1 + self.learning_rate * epoch))
-            print(f"Changing alpha from {self.learning_rate} to {new_learning_rate}")
-            self.learning_rate = new_learning_rate
-        print(f"Total training time: {dt.datetime.now() - t_start}")
-
-    def generate_training_data(self):
-        # Generate training data by iterating through the corpus
-        words = self.preprocess(self.corpus)
-        words = [word for word in words if word in self.vocabulary]
-
-        data = []
-        for i, target_word in enumerate(words):
-            if target_word not in self.word_to_index:
-                continue  # Skip words not in vocabulary
-
-            # Context window defines the range of words to consider as context
-            start = max(0, i - self.context_window)
-            end = min(len(words), i + self.context_window + 1)
-            for j in range(start, end):
-                if i == j:
-                    continue  # Skip the target word itself
-                context_word = words[j]
-                yield context_word, target_word
-        # return data
-
-    def train_pair(self, args):
-        context_word, target_word = args[0], args[1]
+    def train_pair(self, context_word, target_word):
+        # context_word, target_word = args[0], args[1]
         # Calculate loss and update vectors for a context-target word pair
         context_vector = self.word_vectors[self.word_to_index[context_word]]
         target_index = self.word_to_index[target_word]
         probabilities = self.forward_pass(self.word_vectors[target_index])
-        self.backward_pass(context_vector, target_index, probabilities, gradient=1.0)
+        self.backward_pass(self.word_to_index[context_word], target_index, probabilities)
 
         C = 0
         loss = 0
@@ -207,42 +152,12 @@ class Word2VecLearnPhraseSampleFreqWordGPU:
 
         return probabilities
 
-    def backward_pass(self, context_vector, target_index, probabilities, gradient):
+    def backward_pass(self, context_index, target_index, probabilities):
         # Backward pass updates vectors using gradient descent
-        e = probabilities.reshape(-1, 1) - self.word_vectors[target_index].reshape(self.vocab_size, 1)
+        e = probabilities.reshape(-1, 1) - self.word_vectors[context_index].reshape(self.vocab_size, 1)
 
         dLdV = th.matmul(self.hidden_matrix.reshape(-1, 1), e.T)
-        X = context_vector.reshape(self.vocab_size, 1)
+        X = self.word_vectors[target_index].reshape(self.vocab_size, 1)
         dLdU = th.matmul(X, th.matmul(self.V_weights, e).T)
 
         self.update_vectors(self.learning_rate, dLdU, dLdV)
-
-    def softmax(self, x):
-        # return th.nn.Softmax(dim=2)(x)
-        e_x = th.exp(x - th.max(x))  # Exponential of dot products
-        return e_x / e_x.sum()  # Probabilities for all words
-
-    def update_vectors(self, learning_rate, dLdU, dLdV):
-        # Update vectors using gradient descent
-        self.U_weights = self.U_weights - learning_rate * dLdU
-        self.V_weights = self.V_weights - learning_rate * dLdV
-
-    def predict(self, word, number_of_predictions):
-        if word in self.vocabulary:
-            index = self.word_to_index[word]
-            X = [0 for i in range(self.vocab_size)]
-            X[index] = 1
-            prediction = self.forward_pass(X)
-            output = {}
-            for i in range(self.vocab_size):
-                output[prediction[i]] = i
-
-            top_context_words = []
-            for k in sorted(output, reverse=True):
-                top_context_words.append(self.vocabulary[output[k]])
-                if len(top_context_words) >= number_of_predictions:
-                    break
-
-            return top_context_words
-        else:
-            print("Word not found in dictionary")

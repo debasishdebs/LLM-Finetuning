@@ -4,15 +4,16 @@ from collections import defaultdict, OrderedDict
 import math
 import datetime as dt
 import torch as th
+from word2vec import Word2VecBase
 
 # Skip-Gram with sampling on frequent words
 # Learning phrases
 # Noise distribution
 
 
-class Word2VecNegSamplingGPU:
-    def __init__(self, corpus, embedding_dim, context_window=2,
-                 subsampling_threshold=1e-5, negative_samples=5, learning_rate=0.025):
+class Word2VecNegSamplingGPU(Word2VecBase):
+    def __init__(self, corpus, embedding_dim, context_window=2, subsampling_threshold=1e-5, negative_samples=5, learning_rate=0.025):
+        super().__init__()
         self.corpus = corpus
         self.embedding_dim = embedding_dim
         self.context_window = context_window
@@ -21,21 +22,16 @@ class Word2VecNegSamplingGPU:
         self.num_negative_samples = negative_samples
 
         self.subsampling_threshold = subsampling_threshold
-        self.discard_prob_threshold = 0.98
+        self.discard_prob_threshold = 0.95
 
-        self.phrase_threshold = 0.25
+        self.phrase_threshold = 0.2
         self.phrase_discounting_coeff = subsampling_threshold
 
         self.learning_rate = learning_rate
         self.build_vocabulary()
 
     def __str__(self):
-        return "Word2Vec-Softmax-FreqWordSampling-LearnPhrases-NegSampling-CPU"
-
-    def preprocess(self, text):
-        text = text.lower()
-        text = re.sub(r'[^a-zA-Z\s]', '', text)
-        return text.split()
+        return "Word2Vec-Softmax-FreqWordSampling-LearnPhrases-NegSampling-GPU"
 
     def create_noise_distribution(self):
         distribution = self.get_word_probability(0.75)
@@ -101,7 +97,7 @@ class Word2VecNegSamplingGPU:
         self.create_noise_distribution()
 
         self.initialize_embeddings()
-        print(f"Total parameters in model: {self.vocab_size * self.embedding_dim}")
+        print(f"Total parameters in model: {self.vocab_size * self.embedding_dim} and num tokens: {self.vocab_size}")
 
     def generate_unigram_bigram_scores(self, words):
         word_freq = defaultdict(int)
@@ -150,15 +146,6 @@ class Word2VecNegSamplingGPU:
         score = (count_wi_wj - self.phrase_discounting_coeff) / (count_wi * count_wj)
         return score
 
-    def initialize_embeddings(self):
-        # Initialize word and context vectors randomly
-        self.word_vectors = th.eye(self.vocab_size)
-        self.U_weights = th.randn(self.vocab_size, self.embedding_dim)
-        self.V_weights = th.randn(self.embedding_dim, self.vocab_size)
-        self.word_vectors = self.word_vectors.to(device="cuda")
-        self.U_weights = self.U_weights.to(device="cuda")
-        self.V_weights = self.V_weights.to(device="cuda")
-
     def sample_negative_word(self, target_word):
         # Sample a negative word not equal to the target_word
         negative_word = target_word
@@ -168,42 +155,10 @@ class Word2VecNegSamplingGPU:
             negative_word = self.vocabulary[negative_word_index[0]]
         return negative_word
 
-    def train(self, num_epochs):
-        for epoch in range(num_epochs):
-            total_loss = 0
-            t_epoch = dt.datetime.now()
-            idx = 1
-            for context_word, target_word in self.generate_training_data():
-                total_loss += self.train_pair(context_word, target_word)
-                if idx % 10000 == 0:
-                    print(f"Done with {idx} word-target pair")
-                idx += 1
-            print(f"Epoch {epoch + 1}, Loss: {total_loss / len(self.vocabulary)}.Tot Pairs: {idx}. Time taken: {dt.datetime.now() - t_epoch}")
-            new_learning_rate = self.learning_rate * 1 / (1 + self.learning_rate * epoch)
-            print(f"Changing alpha from {self.learning_rate} to {new_learning_rate}")
-            self.learning_rate = new_learning_rate
-
-    def generate_training_data(self):
-        # Generate training data by iterating through the corpus
-        words = self.preprocess(self.corpus)
-        words = [word for word in words if word in self.vocabulary]
-        for i, target_word in enumerate(words):
-            if target_word not in self.word_to_index:
-                continue  # Skip words not in vocabulary
-
-            # Context window defines the range of words to consider as context
-            start = max(0, i - self.context_window)
-            end = min(len(words), i + self.context_window + 1)
-            for j in range(start, end):
-                if i == j:
-                    continue  # Skip the target word itself
-                context_word = words[j]
-                yield context_word, target_word
-
     def train_pair(self, context_word, target_word):
         # Calculate loss and update vectors for a context-target word pair
         target_index = self.word_to_index[target_word]
-        pos_prob, neg_probs = self.forward_pass(target_index)
+        probs = self.forward_pass(self.word_vectors[target_index])
         self.backward_pass(self.word_to_index[context_word], target_index)
 
         C = 0
@@ -216,7 +171,7 @@ class Word2VecNegSamplingGPU:
         loss += C * th.log(th.sum(th.exp(self.output_matrix)))
         return loss
 
-    def forward_pass(self, target_index):
+    def forward_pass(self, target_vector):
         # context_vector = self.word_vectors[self.word_to_index[context_word]]
         # target_vector = self.word_vectors[self.word_to_index[target_word]]
         #
@@ -227,6 +182,11 @@ class Word2VecNegSamplingGPU:
         # pos_prob = self.sigmoid(th.multiply(U_i.T, V_c))
         #
         # # Generate a list of negative samples
+
+        mask_th = th.Tensor([[1] * self.vocab_size]).to(self.device)
+        idx_mask = (th.matmul(mask_th.float(), (self.word_vectors == target_vector).T.float()) == self.vocab_size)[0]
+        target_index = (idx_mask == True).nonzero(as_tuple=False).item()
+
         target_word = self.vocabulary[target_index]
         target_vector = self.word_vectors[target_index]
         self.negative_samples = [self.sample_negative_word(target_word) for _ in range(self.num_negative_samples)]
@@ -244,18 +204,13 @@ class Word2VecNegSamplingGPU:
         #
         # return pos_prob, th.stack(neg_probs)
         # Calculate the dot products between input_vector and all hidden_layer. This would be input to hidden layer. Defined by y = w1.dot(i)
-        self.hidden_matrix = np.dot(self.U_weights.T, target_vector)
+        self.hidden_matrix = th.matmul(self.U_weights.T, target_vector)
         # Calculate the dot products between hidden_layer and output_layer. This would be then applied to softmax to get probabilities. Defined by o = w2.dot(y)
-        self.output_matrix = np.dot(self.V_weights.T, self.hidden_matrix)
+        self.output_matrix = th.matmul(self.V_weights.T, self.hidden_matrix)
         # Softmax formula: P(target_index|context_vector) = exp(dot_product) / sum(exp(all_dot_products))
         probabilities = self.softmax(self.output_matrix)
 
         return probabilities
-
-    def softmax(self, x):
-        # Softmax function to calculate probabilities
-        e_x = np.exp(x - np.max(x))  # Exponential of dot products
-        return e_x / e_x.sum()  # Probabilities for all words
 
     @staticmethod
     def negative_log_likelihood(probabilities, context_vector):
@@ -273,13 +228,13 @@ class Word2VecNegSamplingGPU:
             inner_term = th.matmul(self.V_weights[self.word_vectors[idx].type(th.int)],
                                 self.U_weights[self.word_vectors[target_idx].type(th.int)])
             inner_term = self.sigmoid(inner_term)
-            neg_loss = th.multiply(inner_term, self.U_weights[self.word_vectors[target_idx].type(th.int)])
+            neg_loss = th.mul(inner_term, self.U_weights[self.word_vectors[target_idx].type(th.int)])
             probabilities.append(neg_loss)
 
         positive_term = self.sigmoid(th.matmul(self.V_weights[self.word_vectors[context_idx].type(th.int)],
                                             self.U_weights[self.word_vectors[target_idx].type(th.int)]))
         pos_prob = positive_term - 1
-        pos_loss = th.multiply(pos_prob, self.U_weights[self.word_vectors[target_idx].type(th.int)])
+        pos_loss = th.mul(pos_prob, self.U_weights[self.word_vectors[target_idx].type(th.int)])
 
         probabilities.append(pos_loss)
         dedw_neg = sum(probabilities)
@@ -288,29 +243,5 @@ class Word2VecNegSamplingGPU:
         self.U_weights[self.word_vectors[target_idx].type(th.int)] = self.U_weights[self.word_vectors[target_idx].type(th.int)] - self.learning_rate * dedw_neg
 
     def sigmoid(self, x):
-        return 1 / (1 + th.exp(-x))
-
-    def update_vectors(self, learning_rate, dLdU, dLdV):
-        # Update vectors using gradient descent
-        self.U_weights = self.U_weights - learning_rate * dLdU
-        self.V_weights = self.V_weights - learning_rate * dLdV
-
-    def predict(self, word, number_of_predictions):
-        if word in self.vocabulary:
-            # index = self.word_to_index[word]
-            # X = [0 for i in range(self.vocab_size)]
-            # X[index] = 1
-            prediction = self.forward_pass(self.word_to_index[word])
-            output = {}
-            for i in range(self.vocab_size):
-                output[prediction[i]] = i
-
-            top_context_words = []
-            for k in sorted(output, reverse=True):
-                top_context_words.append(self.vocabulary[output[k]])
-                if len(top_context_words) >= number_of_predictions:
-                    break
-
-            return top_context_words
-        else:
-            print("Word not found in dictionary")
+        # return 1 / (1 + th.exp(-x))
+        return th.sigmoid(x)

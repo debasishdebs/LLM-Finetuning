@@ -101,7 +101,7 @@ class Word2VecNegSamplingCPU:
         self.create_noise_distribution()
 
         self.initialize_embeddings()
-        print(f"Total parameters in model: {self.vocab_size * self.embedding_dim}")
+        print(f"Total parameters in model: {self.vocab_size * self.embedding_dim} and num tokens: {self.vocab_size}")
 
     def generate_unigram_bigram_scores(self, words):
         word_freq = defaultdict(int)
@@ -169,13 +169,14 @@ class Word2VecNegSamplingCPU:
         for epoch in range(num_epochs):
             total_loss = 0
             idx = 1
-            t1_epoch = dt.datetime.now()
+            t_epoch = dt.datetime.now()
             for context_word, target_word in self.generate_training_data():
                 total_loss += self.train_pair(context_word, target_word)
                 if idx % 10000 == 0:
                     print(f"Done with {idx} word-target pair")
                 idx += 1
-            print(f"Epoch {epoch + 1}, Loss: {total_loss / len(self.vocabulary)}. Tot Pairs: {idx}. Time taken: {dt.datetime.now() - t1_epoch}")
+            tot_time = dt.datetime.now() - t_epoch
+            print(f"Epoch {epoch + 1}, Loss: {total_loss / len(self.vocabulary)}.Tot Pairs: {idx}. Time per pair (4 matmuls): {tot_time / idx} Time taken: {tot_time}")
             new_learning_rate = self.learning_rate * 1 / (1 + self.learning_rate * epoch)
             print(f"Changing alpha from {self.learning_rate} to {new_learning_rate}")
             self.learning_rate = new_learning_rate

@@ -20,6 +20,8 @@ if __name__ == '__main__':
     ]
 
     th.multiprocessing.set_start_method('spawn')
+    th.backends.cuda.matmul.allow_tf32 = True
+    th.backends.cudnn.allow_tf32 = True
 
     dataset1_f = os.path.join(os.getcwd() + "/interview_ds.txt")
     dataset2_f = os.path.join(os.getcwd() + "/interview_ds_2.txt")
@@ -30,9 +32,12 @@ if __name__ == '__main__':
         corpus2 = f.read()
 
     corpus = corpus1 + corpus2
+    # gpu_models = [Word2VecNegSamplingGPU]
 
-    model = Word2VecFreqWordSamplingGPU(corpus[:int(1e5)], embedding_dim=300)
-    print(f"Running model {model}")
-    model.train(10)
-    predictions = model.predict("name", 3)
-    print(predictions)
+    for word2vec_model in gpu_models[:-1]:
+        model = word2vec_model(corpus1[:int(1e6)], embedding_dim=100)
+        print(f"Running model {model}")
+        model.train(3)
+        predictions = model.predict("puppy", 3)
+        print(predictions, " are predictiosn for word ", "puppy")
+        print(50*"-")
